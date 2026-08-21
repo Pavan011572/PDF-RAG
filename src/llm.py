@@ -47,7 +47,7 @@ class LLMManager:
         self.api_key = api_key or os.getenv("GROQ_API_KEY") or os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or os.getenv("OPENAI_API_KEY")
         
         if "groq" in self.provider:
-            self.model_name = model_name or os.getenv("GROQ_MODEL") or "llama-3.3-70b-versatile"
+            self.model_name = model_name or os.getenv("GROQ_MODEL") or "openai/gpt-oss-20b"
         elif "gemini" in self.provider:
             self.model_name = model_name or os.getenv("GEMINI_MODEL") or "gemini-1.5-flash"
         else:
@@ -103,37 +103,52 @@ class LLMManager:
             return self._generate_openai(prompt_text)
 
     def _generate_groq(self, prompt_text: str) -> str:
-        """Generate answer via Groq Cloud API."""
+        """Generate answer via Groq Cloud API with model fallback."""
         url = "https://api.groq.com/openai/v1/chat/completions"
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json"
         }
-        payload = {
-            "model": self.model_name,
-            "messages": [
-                {"role": "system", "content": "You are a precise document question-answering assistant."},
-                {"role": "user", "content": prompt_text}
-            ],
-            "temperature": 0.0
-        }
 
-        try:
-            response = requests.post(url, json=payload, headers=headers, timeout=30)
-            if response.status_code != 200:
-                error_detail = response.json().get("error", {}).get("message", response.text)
-                raise LLMError(f"Groq API Error ({response.status_code}): {error_detail}")
+        candidate_models = [self.model_name]
+        for fallback in ["openai/gpt-oss-20b", "openai/gpt-oss-120b", "qwen/qwen3.6-27b", "groq/compound-mini"]:
+            if fallback not in candidate_models:
+                candidate_models.append(fallback)
 
-            data = response.json()
-            choices = data.get("choices", [])
-            if choices:
-                return choices[0].get("message", {}).get("content", "").strip()
-            return "I could not find the answer in the uploaded document."
+        last_error = None
+        for model in candidate_models:
+            payload = {
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": "You are a precise document question-answering assistant."},
+                    {"role": "user", "content": prompt_text}
+                ],
+                "temperature": 0.0
+            }
 
-        except LLMError:
-            raise
-        except Exception as e:
-            raise LLMError(f"Error communicating with Groq API: {str(e)}")
+            try:
+                response = requests.post(url, json=payload, headers=headers, timeout=30)
+                if response.status_code == 200:
+                    data = response.json()
+                    choices = data.get("choices", [])
+                    if choices:
+                        return choices[0].get("message", {}).get("content", "").strip()
+                    return "I could not find the answer in the uploaded document."
+                elif response.status_code == 404:
+                    # Model not available or deprecated on this tier, try next candidate
+                    continue
+                else:
+                    error_detail = response.json().get("error", {}).get("message", response.text)
+                    raise LLMError(f"Groq API Error ({response.status_code}): {error_detail}")
+
+            except LLMError:
+                raise
+            except Exception as e:
+                last_error = e
+
+        if last_error:
+            raise LLMError(f"Error communicating with Groq API: {str(last_error)}")
+        raise LLMError("Groq API Error: No available model found on your Groq account.")
 
     def _generate_gemini(self, prompt_text: str) -> str:
         """Generate answer via Google Gemini API."""
